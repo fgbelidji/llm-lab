@@ -14,46 +14,17 @@ All stages use a shared HuggingFace Dataset format, enabling seamless handoff be
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Source Dataset                                   │
-│              (HuggingFace Hub: HuggingFaceM4/FineVision)                │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Stage 1: EXTRACT                                                        │
-│  ─────────────────                                                       │
-│  • Load document images from source dataset                              │
-│  • Run DeepSeek-OCR with grounding prompt                               │
-│  • Parse bounding boxes, crop figures as separate images                │
-│  • Output: document_markdown + extracted_figures (as HF Images)         │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Stage 2: DESCRIBE                                                       │
-│  ────────────────                                                        │
-│  • Load dataset from Stage 1                                            │
-│  • For each extracted figure, generate a description                    │
-│  • Output: extracted_figures_metadata (with descriptions)               │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Stage 3: ASSEMBLE                                                       │
-│  ────────────────                                                        │
-│  • Load dataset from Stage 2                                            │
-│  • Merge figure captions into Markdown (figure: URIs + alt text)        │
-│  • Output: document_final_markdown                                      │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          Final Dataset                                   │
-│        (HF Hub / S3 / GCS with images embedded in dataset)              │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+### Stage 1: Extract
+
+![Extract Stage](assets/extract.png)
+
+### Stage 2: Describe
+
+![Describe Stage](assets/describe.png)
+
+### Stage 3: Assemble
+
+![Assemble Stage](assets/assemble.png)
 
 ## Project Structure
 
