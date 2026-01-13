@@ -1,0 +1,18 @@
+FROM vllm/vllm-openai:latest
+
+# Install uv for fast dependency management
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Copy pipeline code (from parent directory context)
+WORKDIR /app
+COPY llm_ocr/ /app/llm_ocr/
+COPY google-cloud-run/gcr_job_runner.py /app/
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV PYTHONPATH=/app:$PYTHONPATH
+
+# Entry point - uv run reads deps from inline script metadata (PEP 723)
+ENTRYPOINT ["uv", "run", "/app/gcr_job_runner.py"]
