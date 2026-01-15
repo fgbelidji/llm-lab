@@ -1,17 +1,16 @@
 """Pipeline stages: extract, describe, assemble."""
+
 from __future__ import annotations
 
 import json
 import logging
 import shutil
+import time
 from dataclasses import asdict
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List
 
 from datasets import Features, Sequence, Value, load_dataset, Image as HfImage
-from PIL import Image
-from torch.utils.data import DataLoader
 
 from .config import AssembleSettings, DescribeSettings, ExtractSettings, env
 from .document import build_document_markdown, enrich_markdown_with_captions, write_json
@@ -20,26 +19,41 @@ from .storage import get_storage, get_source_storage
 LOGGER = logging.getLogger(__name__)
 
 
+def _format_duration(seconds: float) -> str:
+    """Format duration as mm:ss."""
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def _now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 
 def _dataset_features() -> Features:
     """Dataset schema - all data is embedded, no external file paths."""
-    return Features({
-        "sample_id": Value("string"),
-        "dataset_index": Value("int64"),
-        "source_image": HfImage(),
-        "document_with_boxes_image": HfImage(),
-        "document_markdown": Value("string"),
-        "extracted_figures": Sequence(HfImage()),
-        "extracted_figures_metadata": Sequence(Value("string")),
-        "document_final_markdown": Value("string"),
-    })
+    return Features(
+        {
+            "sample_id": Value("string"),
+            "dataset_index": Value("int64"),
+            "source_image": HfImage(),
+            "document_with_boxes_image": HfImage(),
+            "document_markdown": Value("string"),
+            "extracted_figures": Sequence(HfImage()),
+            "extracted_figures_metadata": Sequence(Value("string")),
+            "document_final_markdown": Value("string"),
+        }
+    )
 
 
 def run_stage_extract(settings: ExtractSettings) -> None:
     """Run OCR extraction on dataset samples."""
+    stage_start = time.time()
+    LOGGER.info("⏳ Starting EXTRACT stage...")
+
+    # Lazy import torch - only needed for extract stage
+    from torch.utils.data import DataLoader
+
     dataset = load_dataset(
         settings.dataset_name,
         settings.dataset_config,
@@ -51,7 +65,11 @@ def run_stage_extract(settings: ExtractSettings) -> None:
     if settings.stream_dataset:
         num_workers = env("DATALOADER_WORKERS", 2, int)
         prefetch = env("DATALOADER_PREFETCH", 2, int)
-        kwargs = {"batch_size": 1, "num_workers": num_workers, "collate_fn": lambda b: b[0]}
+        kwargs = {
+            "batch_size": 1,
+            "num_workers": num_workers,
+            "collate_fn": lambda b: b[0],
+        }
         if num_workers > 0:
             kwargs["prefetch_factor"] = prefetch
         sample_iter = iter(DataLoader(dataset, **kwargs))
@@ -70,9 +88,14 @@ def run_stage_extract(settings: ExtractSettings) -> None:
     failures: List[Dict[str, Any]] = []
     chunk_size = settings.inference.batch_size
 
-    LOGGER.info("Extract | dataset=%s/%s/%s | max_samples=%s | batch=%s",
-                settings.dataset_name, settings.dataset_config, settings.dataset_split,
-                settings.max_samples, chunk_size)
+    LOGGER.info(
+        "Extract | dataset=%s/%s/%s | max_samples=%s | batch=%s",
+        settings.dataset_name,
+        settings.dataset_config,
+        settings.dataset_split,
+        settings.max_samples,
+        chunk_size,
+    )
 
     contexts: List[Dict[str, Any]] = []
     requests: List[Dict[str, Any]] = []
@@ -105,14 +128,16 @@ def run_stage_extract(settings: ExtractSettings) -> None:
                 sample_id = ctx["sample_id"]
 
                 markdown, figures, figure_images, img_draw = build_document_markdown(
-                    image=img, response_text=text, sample_id=sample_id,
+                    image=img,
+                    response_text=text,
+                    sample_id=sample_id,
                 )
-                
+
                 # Save images locally for dataset loading (HfImage needs file paths)
                 source_path = sample_dir / "source.png"
                 boxes_path = sample_dir / "document_with_boxes.png"
                 img_draw.save(boxes_path)
-                
+
                 # Save figure images for dataset loading
                 figures_dir = sample_dir / "figures"
                 figures_dir.mkdir(parents=True, exist_ok=True)
@@ -122,16 +147,20 @@ def run_stage_extract(settings: ExtractSettings) -> None:
                     fig_img.save(fig_path)
                     figure_paths.append(str(fig_path))
 
-                docs.append({
-                    "sample_id": sample_id,
-                    "dataset_index": ctx["dataset_index"],
-                    "source_image": str(source_path),
-                    "document_with_boxes_image": str(boxes_path),
-                    "document_markdown": markdown,
-                    "extracted_figures": figure_paths,
-                    "extracted_figures_metadata": [json.dumps(asdict(f)) for f in figures],
-                    "document_final_markdown": "",  # Filled in assemble stage
-                })
+                docs.append(
+                    {
+                        "sample_id": sample_id,
+                        "dataset_index": ctx["dataset_index"],
+                        "source_image": str(source_path),
+                        "document_with_boxes_image": str(boxes_path),
+                        "document_markdown": markdown,
+                        "extracted_figures": figure_paths,
+                        "extracted_figures_metadata": [
+                            json.dumps(asdict(f)) for f in figures
+                        ],
+                        "document_final_markdown": "",  # Filled in assemble stage
+                    }
+                )
             except Exception as exc:
                 LOGGER.exception("Failed sample %s", ctx["sample_id"])
                 failures.append({"sample_id": ctx["sample_id"], "error": str(exc)})
@@ -161,14 +190,23 @@ def run_stage_extract(settings: ExtractSettings) -> None:
             img = img.convert("RGB")
         img.save(sample_dir / "source.png")
 
-        contexts.append({"sample_id": sample_id, "dataset_index": idx, "sample_dir": sample_dir, "image": img.copy()})
-        requests.append({
-            "image": contexts[-1]["image"],
-            "prompt": settings.prompt,
-            "max_tokens": settings.max_tokens,
-            "temperature": settings.temperature,
-            "request_timeout": settings.inference.request_timeout,
-        })
+        contexts.append(
+            {
+                "sample_id": sample_id,
+                "dataset_index": idx,
+                "sample_dir": sample_dir,
+                "image": img.copy(),
+            }
+        )
+        requests.append(
+            {
+                "image": contexts[-1]["image"],
+                "prompt": settings.prompt,
+                "max_tokens": settings.max_tokens,
+                "temperature": settings.temperature,
+                "request_timeout": settings.inference.request_timeout,
+            }
+        )
         img.close()
 
         if len(requests) >= chunk_size:
@@ -177,12 +215,15 @@ def run_stage_extract(settings: ExtractSettings) -> None:
     flush()
 
     # Save manifest
-    write_json(settings.output_dir / "manifest.json", {
-        "generated_at": _now_iso(),
-        "stage": "extract",
-        "documents_count": doc_count,
-        "failures": failures,
-    })
+    write_json(
+        settings.output_dir / "manifest.json",
+        {
+            "generated_at": _now_iso(),
+            "stage": "extract",
+            "documents_count": doc_count,
+            "failures": failures,
+        },
+    )
 
     # Load as HF dataset
     ds = load_dataset("json", data_files=batch_files, features=_dataset_features())
@@ -192,15 +233,28 @@ def run_stage_extract(settings: ExtractSettings) -> None:
     storage = get_storage(repo_id=settings.hub.repo_id)
     storage.save_dataset(ds, "dataset")
 
-    LOGGER.info("Extract complete | docs=%d | failures=%d", doc_count, len(failures))
+    elapsed = time.time() - stage_start
+    LOGGER.info(
+        "✅ Extract complete | docs=%d | failures=%d | duration=%s",
+        doc_count,
+        len(failures),
+        _format_duration(elapsed),
+    )
 
 
 def run_stage_describe(settings: DescribeSettings) -> None:
     """Describe figures in the dataset that lack descriptions."""
+    stage_start = time.time()
+    LOGGER.info("⏳ Starting DESCRIBE stage...")
+
     # Get source storage and load dataset
-    source_storage = get_source_storage(source_repo_id=settings.source_repo_id or settings.hub.repo_id)
+    source_storage = get_source_storage(
+        source_repo_id=settings.source_repo_id or settings.hub.repo_id
+    )
     if not source_storage.is_configured:
-        raise ValueError("No source configured for describe stage (set SOURCE_REPO_ID, HF_REPO_ID, or S3_INPUT_URI)")
+        raise ValueError(
+            "No source configured for describe stage (set SOURCE_REPO_ID, HF_REPO_ID, or S3_INPUT_URI)"
+        )
 
     dataset = source_storage.load_dataset()
     if dataset is None:
@@ -264,18 +318,28 @@ def run_stage_describe(settings: DescribeSettings) -> None:
             fig_id = meta.get("figure_id", "")
 
             if i >= len(images) or images[i] is None:
-                failures.append({"sample_id": sample_id, "figure_id": fig_id, "reason": "missing_image"})
+                failures.append(
+                    {
+                        "sample_id": sample_id,
+                        "figure_id": fig_id,
+                        "reason": "missing_image",
+                    }
+                )
                 continue
 
             fig_img = images[i]
-            contexts.append({"sample_id": sample_id, "figure_id": fig_id, "image": fig_img})
-            requests.append({
-                "image": fig_img,
-                "prompt": settings.prompt,
-                "max_tokens": settings.max_tokens,
-                "temperature": settings.temperature,
-                "request_timeout": settings.inference.request_timeout,
-            })
+            contexts.append(
+                {"sample_id": sample_id, "figure_id": fig_id, "image": fig_img}
+            )
+            requests.append(
+                {
+                    "image": fig_img,
+                    "prompt": settings.prompt,
+                    "max_tokens": settings.max_tokens,
+                    "temperature": settings.temperature,
+                    "request_timeout": settings.inference.request_timeout,
+                }
+            )
 
             if len(requests) >= chunk_size:
                 flush()
@@ -298,8 +362,11 @@ def run_stage_describe(settings: DescribeSettings) -> None:
         LOGGER.info("No descriptions generated")
         return
 
-    LOGGER.info("Lookup has %d descriptions, first few: %s", 
-                len(lookup), list(lookup.keys())[:3])
+    LOGGER.info(
+        "Lookup has %d descriptions, first few: %s",
+        len(lookup),
+        list(lookup.keys())[:3],
+    )
 
     def apply(row):
         metas = row.get("extracted_figures_metadata") or []
@@ -318,23 +385,40 @@ def run_stage_describe(settings: DescribeSettings) -> None:
     # Verify before saving
     test_meta = updated[0]["extracted_figures_metadata"]
     if test_meta:
-        test_parsed = json.loads(test_meta[0]) if isinstance(test_meta[0], str) else test_meta[0]
-        LOGGER.info("VERIFY before save - description present: %s", 
-                    test_parsed.get("description") is not None)
+        test_parsed = (
+            json.loads(test_meta[0]) if isinstance(test_meta[0], str) else test_meta[0]
+        )
+        LOGGER.info(
+            "VERIFY before save - description present: %s",
+            test_parsed.get("description") is not None,
+        )
 
     # Get output storage and save
     storage = get_storage(repo_id=settings.hub.repo_id)
     storage.save_dataset(updated, "dataset")
 
-    LOGGER.info("Describe complete | described=%d | failures=%d", described, len(failures))
+    elapsed = time.time() - stage_start
+    LOGGER.info(
+        "✅ Describe complete | described=%d | failures=%d | duration=%s",
+        described,
+        len(failures),
+        _format_duration(elapsed),
+    )
 
 
 def run_stage_assemble(settings: AssembleSettings) -> None:
     """Enrich markdown with figure descriptions."""
+    stage_start = time.time()
+    LOGGER.info("⏳ Starting ASSEMBLE stage...")
+
     # Get source storage and load dataset
-    source_storage = get_source_storage(source_repo_id=settings.source_repo_id or settings.hub.repo_id)
+    source_storage = get_source_storage(
+        source_repo_id=settings.source_repo_id or settings.hub.repo_id
+    )
     if not source_storage.is_configured:
-        raise ValueError("No source configured for assemble stage (set SOURCE_REPO_ID, HF_REPO_ID, or S3_INPUT_URI)")
+        raise ValueError(
+            "No source configured for assemble stage (set SOURCE_REPO_ID, HF_REPO_ID, or S3_INPUT_URI)"
+        )
 
     dataset = source_storage.load_dataset()
     if dataset is None:
@@ -369,7 +453,9 @@ def run_stage_assemble(settings: AssembleSettings) -> None:
     storage = get_storage(repo_id=settings.hub.repo_id)
     storage.save_dataset(dataset, "dataset")
 
-    LOGGER.info("Assemble complete | assembled=%d", assembled_count)
-
-
-__all__ = ["run_stage_extract", "run_stage_describe", "run_stage_assemble"]
+    elapsed = time.time() - stage_start
+    LOGGER.info(
+        "✅ Assemble complete | assembled=%d | duration=%s",
+        assembled_count,
+        _format_duration(elapsed),
+    )

@@ -5,11 +5,12 @@ abstracting away whether we're using HuggingFace Hub, S3, or GCS.
 
 Usage:
     from .storage import get_storage
-    
+
     storage = get_storage()
     storage.save_dataset(dataset, "my_dataset")
     dataset = storage.load_dataset()
 """
+
 from __future__ import annotations
 
 import logging
@@ -26,32 +27,17 @@ LOGGER = logging.getLogger(__name__)
 
 class DatasetStorage(ABC):
     """Abstract base class for dataset storage backends."""
-    
+
     @abstractmethod
     def save_dataset(self, dataset: "Dataset", name: str) -> bool:
-        """Save a HuggingFace dataset to storage.
-        
-        Args:
-            dataset: HuggingFace Dataset to save
-            name: Name/identifier for the dataset
-            
-        Returns:
-            True if save succeeded
-        """
+        """Save dataset to storage. Returns True on success."""
         pass
-    
+
     @abstractmethod
     def load_dataset(self, split: str = "train") -> Optional["Dataset"]:
-        """Load a HuggingFace dataset from storage.
-        
-        Args:
-            split: Dataset split to load
-            
-        Returns:
-            Loaded Dataset or None if not available
-        """
+        """Load dataset from storage. Returns None if unavailable."""
         pass
-    
+
     @property
     @abstractmethod
     def is_configured(self) -> bool:
@@ -61,7 +47,7 @@ class DatasetStorage(ABC):
 
 class HFHubStorage(DatasetStorage):
     """HuggingFace Hub storage backend."""
-    
+
     def __init__(
         self,
         repo_id: Optional[str] = None,
@@ -72,16 +58,23 @@ class HFHubStorage(DatasetStorage):
         self.branch = branch or env("HF_BRANCH")
         self.commit_message = commit_message or env("HF_COMMIT_MESSAGE")
         self._token = env("HF_TOKEN")
-    
+
     @property
     def is_configured(self) -> bool:
         return bool(self.repo_id)
-    
+
     def save_dataset(self, dataset: "Dataset", name: str) -> bool:
         if not self.is_configured:
             LOGGER.debug("HF Hub not configured, skipping dataset save")
             return False
-        
+
+        # Fail early if token is missing or empty
+        if not self._token:
+            raise ValueError(
+                "HF_TOKEN is required to push datasets to the Hub. "
+                "Set the HF_TOKEN environment variable with a token that has write permissions."
+            )
+
         try:
             dataset.push_to_hub(
                 self.repo_id,
@@ -93,16 +86,16 @@ class HFHubStorage(DatasetStorage):
             return True
         except Exception as exc:
             LOGGER.exception("HF Hub dataset push failed: %s", exc)
-            return False
-    
+            raise
+
     def load_dataset(self, split: str = "train") -> Optional["Dataset"]:
         if not self.is_configured:
             LOGGER.debug("HF Hub not configured, cannot load dataset")
             return None
-        
+
         try:
             from datasets import load_dataset
-            
+
             LOGGER.info("Loading dataset from HF Hub: %s", self.repo_id)
             return load_dataset(self.repo_id, split=split, token=self._token)
         except Exception as exc:
@@ -112,7 +105,7 @@ class HFHubStorage(DatasetStorage):
 
 class S3Storage(DatasetStorage):
     """Amazon S3 storage backend."""
-    
+
     def __init__(
         self,
         output_uri: Optional[str] = None,
@@ -120,19 +113,19 @@ class S3Storage(DatasetStorage):
     ):
         self.output_uri = output_uri or env("S3_OUTPUT_URI")
         self.input_uri = input_uri or env("S3_INPUT_URI")
-    
+
     @property
     def is_configured(self) -> bool:
         return bool(self.output_uri or self.input_uri)
-    
+
     def save_dataset(self, dataset: "Dataset", name: str) -> bool:
         if not self.output_uri:
             LOGGER.debug("S3 output URI not configured, skipping dataset save")
             return False
-        
+
         try:
             from .sm_io import save_dataset_to_s3
-            
+
             save_dataset_to_s3(dataset, self.output_uri, name)
             return True
         except ImportError as exc:
@@ -141,15 +134,15 @@ class S3Storage(DatasetStorage):
         except Exception as exc:
             LOGGER.exception("S3 dataset save failed: %s", exc)
             return False
-    
+
     def load_dataset(self, split: str = "train") -> Optional["Dataset"]:
         if not self.input_uri:
             LOGGER.debug("S3 input URI not configured, cannot load dataset")
             return None
-        
+
         try:
             from .sm_io import load_dataset_from_s3
-            
+
             return load_dataset_from_s3(self.input_uri, split=split)
         except ImportError as exc:
             LOGGER.warning("S3 load failed (missing dependency): %s", exc)
@@ -161,7 +154,7 @@ class S3Storage(DatasetStorage):
 
 class GCSStorage(DatasetStorage):
     """Google Cloud Storage backend."""
-    
+
     def __init__(
         self,
         output_uri: Optional[str] = None,
@@ -169,19 +162,19 @@ class GCSStorage(DatasetStorage):
     ):
         self.output_uri = output_uri or env("GCS_OUTPUT_URI")
         self.input_uri = input_uri or env("GCS_INPUT_URI")
-    
+
     @property
     def is_configured(self) -> bool:
         return bool(self.output_uri or self.input_uri)
-    
+
     def save_dataset(self, dataset: "Dataset", name: str) -> bool:
         if not self.output_uri:
             LOGGER.debug("GCS output URI not configured, skipping dataset save")
             return False
-        
+
         try:
-            from .gcr_io import save_dataset_to_gcs
-            
+            from .cloudrun_io import save_dataset_to_gcs
+
             save_dataset_to_gcs(dataset, self.output_uri, name)
             return True
         except ImportError as exc:
@@ -190,15 +183,15 @@ class GCSStorage(DatasetStorage):
         except Exception as exc:
             LOGGER.exception("GCS dataset save failed: %s", exc)
             return False
-    
+
     def load_dataset(self, split: str = "train") -> Optional["Dataset"]:
         if not self.input_uri:
             LOGGER.debug("GCS input URI not configured, cannot load dataset")
             return None
-        
+
         try:
-            from .gcr_io import load_dataset_from_gcs
-            
+            from .cloudrun_io import load_dataset_from_gcs
+
             return load_dataset_from_gcs(self.input_uri, split=split)
         except ImportError as exc:
             LOGGER.warning("GCS load failed (missing dependency): %s", exc)
@@ -216,25 +209,26 @@ def get_storage(
     gcs_output_uri: Optional[str] = None,
     gcs_input_uri: Optional[str] = None,
 ) -> DatasetStorage:
-    """Get the appropriate storage backend based on configuration.
-    
-    Priority: GCS > S3 > HF Hub.
-    
-    Args:
-        repo_id: Override HF repo ID
-        s3_output_uri: Override S3 output URI
-        s3_input_uri: Override S3 input URI
-        gcs_output_uri: Override GCS output URI
-        gcs_input_uri: Override GCS input URI
-        
-    Returns:
-        Configured DatasetStorage instance
-    """
+    """Get the configured storage backend. Exactly one must be configured."""
     gcs = GCSStorage(output_uri=gcs_output_uri, input_uri=gcs_input_uri)
     s3 = S3Storage(output_uri=s3_output_uri, input_uri=s3_input_uri)
     hf = HFHubStorage(repo_id=repo_id)
-    
-    # Return first configured backend
+
+    configured = [
+        name
+        for name, backend in [("GCS", gcs), ("S3", s3), ("HF Hub", hf)]
+        if backend.is_configured
+    ]
+
+    if len(configured) > 1:
+        raise ValueError(
+            f"Multiple storage backends configured: {configured}. Configure only one."
+        )
+    if len(configured) == 0:
+        raise ValueError(
+            "No storage backend configured. Set HF_REPO_ID, S3_OUTPUT_URI, or GCS_OUTPUT_URI."
+        )
+
     if gcs.is_configured:
         return gcs
     if s3.is_configured:
@@ -246,33 +240,28 @@ def get_source_storage(
     *,
     source_repo_id: Optional[str] = None,
 ) -> DatasetStorage:
-    """Get storage backend for loading source data.
-    
-    Checks GCS_INPUT_URI first, then S3_INPUT_URI, then falls back to HF Hub.
-    
-    Args:
-        source_repo_id: HF repo ID to load from (falls back to SOURCE_REPO_ID env var)
-        
-    Returns:
-        Configured DatasetStorage instance for loading
-    """
+    """Get storage for loading source data. Exactly one must be configured."""
     gcs_input = env("GCS_INPUT_URI")
+    s3_input = env("S3_INPUT_URI")
+    hf_repo = source_repo_id or env("SOURCE_REPO_ID") or env("HF_REPO_ID")
+
+    configured = [
+        name
+        for name, val in [("GCS", gcs_input), ("S3", s3_input), ("HF Hub", hf_repo)]
+        if val
+    ]
+
+    if len(configured) > 1:
+        raise ValueError(
+            f"Multiple source backends configured: {configured}. Configure only one."
+        )
+    if len(configured) == 0:
+        raise ValueError(
+            "No source storage configured. Set SOURCE_REPO_ID, S3_INPUT_URI, or GCS_INPUT_URI."
+        )
+
     if gcs_input:
         return GCSStorage(input_uri=gcs_input)
-    
-    s3_input = env("S3_INPUT_URI")
     if s3_input:
         return S3Storage(input_uri=s3_input)
-    
-    repo_id = source_repo_id or env("SOURCE_REPO_ID") or env("HF_REPO_ID")
-    return HFHubStorage(repo_id=repo_id)
-
-
-__all__ = [
-    "DatasetStorage",
-    "HFHubStorage",
-    "S3Storage",
-    "GCSStorage",
-    "get_storage",
-    "get_source_storage",
-]
+    return HFHubStorage(repo_id=hf_repo)

@@ -1,11 +1,18 @@
 """CLI entrypoint for the DeepSeek OCR pipeline."""
+
 from __future__ import annotations
 
 import logging
-import os
 
 from .config import AssembleSettings, DescribeSettings, ExtractSettings, env
-from .server import DeepSeekClient, base_url_from_env, launch_vllm, should_launch_server, shutdown_server, wait_for_server
+from .server import (
+    DeepSeekClient,
+    base_url_from_env,
+    launch_vllm,
+    should_launch_server,
+    shutdown_server,
+    wait_for_server,
+)
 from .stages import run_stage_assemble, run_stage_describe, run_stage_extract
 
 LOGGER = logging.getLogger(__name__)
@@ -17,14 +24,27 @@ def _setup_logging() -> None:
     try:
         from rich.console import Console
         from rich.logging import RichHandler
-        console = Console(force_terminal=env("FORCE_COLOR", "").lower() in {"1", "true"})
-        handler = RichHandler(console=console, show_time=True, show_level=True, rich_tracebacks=True)
-        logging.basicConfig(level=level, format="%(message)s", handlers=[handler], force=True)
+
+        console = Console(
+            force_terminal=env("FORCE_COLOR", "").lower() in {"1", "true"}
+        )
+        handler = RichHandler(
+            console=console, show_time=True, show_level=True, rich_tracebacks=True
+        )
+        logging.basicConfig(
+            level=level, format="%(message)s", handlers=[handler], force=True
+        )
     except ImportError:
-        logging.basicConfig(level=level, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", force=True)
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+            force=True,
+        )
 
 
-def _create_client(max_tokens: int, temperature: float, inference_settings) -> DeepSeekClient:
+def _create_client(
+    max_tokens: int, temperature: float, inference_settings
+) -> DeepSeekClient:
     """Create DeepSeek client from environment."""
     return DeepSeekClient(
         base_url=base_url_from_env(),
@@ -62,6 +82,7 @@ def main() -> None:
 
         if stage == "extract":
             from .config import InferenceSettings
+
             inference = InferenceSettings.from_env("EXTRACT")
             max_tokens = env("DOC_MAX_TOKENS", 2048, int)
             temperature = env("DOC_TEMPERATURE", 0.0, float)
@@ -72,6 +93,7 @@ def main() -> None:
 
         elif stage == "describe":
             from .config import InferenceSettings
+
             inference = InferenceSettings.from_env("DESCRIBE")
             max_tokens = env("FIGURE_MAX_TOKENS", 512, int)
             temperature = env("FIGURE_TEMPERATURE", 0.0, float)
@@ -87,6 +109,3 @@ def main() -> None:
     finally:
         if server_process is not None:
             shutdown_server(server_process)
-
-
-__all__ = ["main"]

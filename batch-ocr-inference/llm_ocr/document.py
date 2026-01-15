@@ -1,4 +1,5 @@
 """Document processing: markdown extraction, figure handling, and caption enrichment."""
+
 from __future__ import annotations
 
 import ast
@@ -47,12 +48,14 @@ def extract_grounding_blocks(text: str) -> List[Dict[str, Any]]:
                 coordinates = ast.literal_eval(coords_text)
             except Exception:
                 coordinates = None
-        matches.append({
-            "label": label,
-            "coordinates": coordinates,
-            "raw": match.group(0),
-            "span": match.span(),
-        })
+        matches.append(
+            {
+                "label": label,
+                "coordinates": coordinates,
+                "raw": match.group(0),
+                "span": match.span(),
+            }
+        )
     return matches
 
 
@@ -89,10 +92,13 @@ def crop_figure(
     pixel_box: List[int],
     label: str,
 ) -> Tuple[FigureMetadata, Image.Image]:
-    """Crop a figure from the source image.
-    
+    """Crop a figure region from the source image.
+
+    Args:
+        pixel_box: [x1, y1, x2, y2] bounding box in pixels
+
     Returns:
-        Tuple of (metadata, cropped_image) - image is for embedding in dataset
+        (metadata, cropped_image) tuple for embedding in dataset
     """
     x1, y1, x2, y2 = pixel_box
     crop = image.crop((x1, y1, x2, y2)).copy()
@@ -104,7 +110,7 @@ def crop_figure(
         label=label,
         bounding_box_pixels={"x1": x1, "y1": y1, "x2": x2, "y2": y2},
     )
-    
+
     return metadata, crop
 
 
@@ -126,14 +132,10 @@ def build_document_markdown(
     response_text: str,
     sample_id: str,
 ) -> Tuple[str, List[FigureMetadata], List[Image.Image], Image.Image]:
-    """
-    Process model response to extract markdown and figures.
-    
+    """Process model response to extract markdown and figures.
+
     Returns:
-        - Cleaned markdown with figure references (using figure:{id} URIs)
-        - List of figure metadata
-        - List of cropped figure images (for embedding in dataset)
-        - Annotated image with bounding boxes
+        (markdown, figure_metadata, figure_images, annotated_image) tuple
     """
     blocks = extract_grounding_blocks(response_text)
     replacements: List[Tuple[int, int, str]] = []
@@ -154,7 +156,11 @@ def build_document_markdown(
         start, end = block["span"]
 
         # Random color for this block
-        color = (np.random.randint(0, 200), np.random.randint(0, 200), np.random.randint(0, 255))
+        color = (
+            np.random.randint(0, 200),
+            np.random.randint(0, 200),
+            np.random.randint(0, 255),
+        )
         color_alpha = color + (20,)
 
         # Convert normalized coords to pixels
@@ -177,10 +183,13 @@ def build_document_markdown(
             figures.append(metadata)
             figure_images.append(crop)
             # Use figure:{id} URI format - clearly an identifier, not a file path
-            replacements.append((
-                start, end,
-                f"![{metadata.figure_id}](figure:{metadata.figure_id})",
-            ))
+            replacements.append(
+                (
+                    start,
+                    end,
+                    f"![{metadata.figure_id}](figure:{metadata.figure_id})",
+                )
+            )
             figure_index += 1
         else:
             replacements.append((start, end, ""))
@@ -194,7 +203,9 @@ def build_document_markdown(
         text_x, text_y = x1, max(0, y1 - 15)
         text_bbox = draw.textbbox((0, 0), label, font=font)
         text_w, text_h = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
-        draw.rectangle([text_x, text_y, text_x + text_w, text_y + text_h], fill=(255, 255, 255, 30))
+        draw.rectangle(
+            [text_x, text_y, text_x + text_w, text_y + text_h], fill=(255, 255, 255, 30)
+        )
         draw.text((text_x, text_y), label, font=font, fill=color)
 
     img_draw.paste(overlay, (0, 0), overlay)
@@ -217,27 +228,20 @@ def enrich_markdown_with_captions(
     markdown: str,
     description_map: Dict[str, Dict[str, Any]],
 ) -> str:
-    """Add figure captions to markdown based on descriptions.
-    
-    Handles both new format ![figure_id](figure:figure_id) and 
-    legacy format ![Figure figure_id](path).
-    
-    The alt text is kept short (first sentence/~120 chars) for accessibility.
-    The full description appears as an italicized caption below the image.
-    """
+    """Add figure captions to markdown. Alt text is truncated; full description below."""
     used: set[str] = set()
 
     def replace(match: re.Match[str]) -> str:
         alt_text = match.group("figure_id").strip()
         path = match.group("path").strip()
-        
+
         # Extract figure_id from figure:{id} URI or from alt text
         if path.startswith("figure:"):
             figure_id = path[7:]  # Remove "figure:" prefix
         else:
             # Legacy format - figure_id is in alt text after "Figure "
             figure_id = alt_text.replace("Figure ", "").split(":")[0].strip()
-        
+
         entry = description_map.get(figure_id)
         if not entry:
             return match.group(0)
@@ -248,10 +252,10 @@ def enrich_markdown_with_captions(
 
         # Alt text: short summary (first sentence, max 120 chars)
         short_alt = _truncate_for_alt(description)
-        
+
         # Image tag with short alt text
         rendered = f"![{figure_id}: {short_alt}]({path})"
-        
+
         # Add full caption below (only once per figure)
         if figure_id not in used:
             rendered += f"\n\n*Figure {figure_id}: {description}*\n"
@@ -266,62 +270,42 @@ def render_markdown_with_images(
     figure_images: List[Image.Image],
     figure_metadata: List[Dict[str, Any]],
 ) -> str:
-    """
-    Render markdown with embedded images as base64 data URIs.
-    
-    The dataset stores images in `extracted_figures` (PIL images) and metadata
-    in `extracted_figures_metadata` (with figure_id). This function replaces
-    figure:{id} URIs in markdown with base64-encoded images.
-    
-    Args:
-        markdown: Markdown text with ![figure_id](figure:figure_id) references
-        figure_images: List of PIL images from dataset's extracted_figures column
-        figure_metadata: List of metadata dicts (parsed from extracted_figures_metadata)
-        
-    Returns:
-        Self-contained markdown with images embedded as data URIs
-    """
+    """Replace figure:{id} URIs in markdown with base64-encoded images."""
     # Build figure_id -> image mapping
     id_to_image: Dict[str, Image.Image] = {}
     for i, meta in enumerate(figure_metadata):
         fig_id = meta.get("figure_id", "")
         if fig_id and i < len(figure_images) and figure_images[i] is not None:
             id_to_image[fig_id] = figure_images[i]
-    
+
     def replace(match: re.Match[str]) -> str:
         alt_text = match.group("figure_id").strip()
         path = match.group("path").strip()
-        
+
         # Extract figure_id from figure:{id} URI or use alt_text as fallback
         if path.startswith("figure:"):
             figure_id = path[7:]  # Remove "figure:" prefix
         else:
             # Legacy path format - extract figure_id from alt_text
             figure_id = alt_text.replace("Figure ", "").split(":")[0].strip()
-        
+
         img = id_to_image.get(figure_id)
         if img is None:
             return match.group(0)  # Keep original if image not found
-        
+
         # Embed as base64 data URI
         data_uri = f"data:image/png;base64,{encode_image(img)}"
         return f"![{alt_text}]({data_uri})"
-    
+
     return FIGURE_MARKDOWN_PATTERN.sub(replace, markdown)
 
 
 def render_sample_markdown(sample: Dict[str, Any]) -> str:
-    """
-    Render a dataset sample's markdown with embedded images.
-    
-    Args:
-        sample: A row from the dataset (dict with column values)
-        
-    Returns:
-        Self-contained markdown string with images as data URIs
-    """
-    markdown = sample.get("document_final_markdown") or sample.get("document_markdown") or ""
-    
+    """Render dataset sample's markdown with embedded base64 images."""
+    markdown = (
+        sample.get("document_final_markdown") or sample.get("document_markdown") or ""
+    )
+
     # Parse metadata
     raw_metadata = sample.get("extracted_figures_metadata") or []
     metadata = []
@@ -330,9 +314,9 @@ def render_sample_markdown(sample: Dict[str, Any]) -> str:
             metadata.append(json.loads(m))
         else:
             metadata.append(m)
-    
+
     images = sample.get("extracted_figures") or []
-    
+
     return render_markdown_with_images(
         markdown=markdown,
         figure_images=images,
@@ -341,29 +325,64 @@ def render_sample_markdown(sample: Dict[str, Any]) -> str:
 
 
 def display_markdown(sample: Dict[str, Any]) -> None:
-    """
-    Display a dataset sample's markdown with images rendered in Jupyter.
-    
-    This function takes a dataset row, renders the figure: URIs as actual
-    images (from the extracted_figures column), and displays the result
-    as formatted markdown in the notebook.
-    
-    Args:
-        sample: A row from the dataset (dict with column values)
-    """
+    """Display sample's markdown with embedded images in Jupyter."""
     from IPython.display import display, Markdown
-    
+
     rendered = render_sample_markdown(sample)
     display(Markdown(rendered))
 
 
-__all__ = [
-    "encode_image",
-    "build_document_markdown",
-    "enrich_markdown_with_captions",
-    "render_markdown_with_images",
-    "render_sample_markdown",
-    "display_markdown",
-    "write_text",
-    "write_json",
-]
+def display_samples(dataset, num_samples: int = 2) -> None:
+    """Display samples with source images, markdown, and figure descriptions."""
+    from IPython.display import display
+
+    print(f"Dataset: {len(dataset)} samples")
+    print(f"Columns: {list(dataset.column_names)}")
+    print()
+
+    for i in range(min(num_samples, len(dataset))):
+        sample = dataset[i]
+        print(f"=== Sample {i}: {sample.get('sample_id', i)} ===")
+
+        # Show source image
+        if sample.get("source_image"):
+            print("Source image:")
+            img = sample["source_image"]
+            img.thumbnail((500, 500))  # Resize to max 500px
+            display(img)
+
+        # Show markdown preview
+        md = sample.get("document_markdown") or sample.get("document_markdown_text", "")
+        if md:
+            print(f"\nMarkdown preview ({len(md)} chars):")
+            print(md[:500] + "..." if len(md) > 500 else md)
+
+        # Show final markdown if available
+        final_md = sample.get("document_final_markdown") or sample.get(
+            "document_final_markdown_text", ""
+        )
+        if final_md:
+            print(f"\nFinal markdown preview ({len(final_md)} chars):")
+            print(final_md[:500] + "..." if len(final_md) > 500 else final_md)
+
+        # Show figures and their descriptions
+        figures = sample.get("extracted_figures", [])
+        metadata = sample.get("extracted_figures_metadata", [])
+        if figures:
+            print(f"\nExtracted figures: {len(figures)}")
+            for j, fig in enumerate(figures[:2]):  # Show max 2 figures
+                fig.thumbnail((500, 500))
+                display(fig)
+                # Show figure description if available
+                if j < len(metadata):
+                    try:
+                        meta = (
+                            json.loads(metadata[j])
+                            if isinstance(metadata[j], str)
+                            else metadata[j]
+                        )
+                        if meta.get("description"):
+                            print(f"  📝 Description: {meta['description'][:200]}...")
+                    except Exception:
+                        pass
+        print()

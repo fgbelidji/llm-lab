@@ -1,4 +1,5 @@
 """vLLM server management and async inference client."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,12 +9,15 @@ import signal
 import subprocess
 import threading
 import time
-from typing import Any, Awaitable, Dict, List, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Dict, List, Sequence
 
 import requests
 from openai import AsyncOpenAI
 
 from .document import encode_image
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,20 +39,31 @@ def launch_vllm() -> subprocess.Popen:
     host = os.environ.get("HOST", "0.0.0.0")
 
     cmd: List[str] = [
-        "vllm", "serve", "--model", model_id,
-        "--served-model-name", served_name,
-        "--tensor-parallel-size", os.environ.get("TENSOR_PARALLEL_SIZE", "1"),
-        "--max-model-len", os.environ.get("MAX_MODEL_LEN", "4096"),
-        "--gpu-memory-utilization", os.environ.get("GPU_MEMORY_UTILIZATION", "0.90"),
-        "--port", port,
-        "--host", host,
+        "vllm",
+        "serve",
+        "--model",
+        model_id,
+        "--served-model-name",
+        served_name,
+        "--tensor-parallel-size",
+        os.environ.get("TENSOR_PARALLEL_SIZE", "1"),
+        "--max-model-len",
+        os.environ.get("MAX_MODEL_LEN", "4096"),
+        "--gpu-memory-utilization",
+        os.environ.get("GPU_MEMORY_UTILIZATION", "0.90"),
+        "--port",
+        port,
+        "--host",
+        host,
         "--trust-remote-code",
         "--enable-chunked-prefill",
         "--no-enable-prefix-caching",
-        "--mm-processor-cache-gb", os.environ.get("MM_PROCESSOR_CACHE_GB", "0"),
-        "--logits-processors", os.environ.get(
+        "--mm-processor-cache-gb",
+        os.environ.get("MM_PROCESSOR_CACHE_GB", "0"),
+        "--logits-processors",
+        os.environ.get(
             "LOGITS_PROCESSORS",
-            "vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor"
+            "vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor",
         ),
     ]
 
@@ -57,13 +72,17 @@ def launch_vllm() -> subprocess.Popen:
         cmd.extend(extra_args.split())
 
     LOGGER.info("Launching vLLM server: %s", " ".join(cmd))
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
+    )
 
     # Start output streaming threads
     threads = []
     for name, pipe in [("STDOUT", process.stdout), ("STDERR", process.stderr)]:
         if pipe:
-            t = threading.Thread(target=_stream_output, args=(pipe, f"vLLM {name}"), daemon=True)
+            t = threading.Thread(
+                target=_stream_output, args=(pipe, f"vLLM {name}"), daemon=True
+            )
             t.start()
             threads.append(t)
 
@@ -85,18 +104,34 @@ def shutdown_server(server_process: subprocess.Popen) -> None:
         thread.join(timeout=1)
 
 
+def _format_duration(seconds: float) -> str:
+    """Format duration as mm:ss."""
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def wait_for_server(url: str, timeout_s: int = None, interval_s: int = 5) -> bool:
+    """Wait for server health endpoint to respond."""
     if timeout_s is None:
         timeout_s = int(os.environ.get("VLLM_STARTUP_TIMEOUT", "600"))  # 10 min default
-    """Wait for server health endpoint to respond."""
+
+    start_time = time.time()
+    LOGGER.info("⏳ Waiting for vLLM server to start...")
+
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
             if requests.get(url, timeout=5).ok:
+                elapsed = time.time() - start_time
+                LOGGER.info("✅ vLLM server ready in %s", _format_duration(elapsed))
                 return True
         except Exception:
             pass
         time.sleep(interval_s)
+
+    elapsed = time.time() - start_time
+    LOGGER.error("❌ vLLM server failed to start after %s", _format_duration(elapsed))
     return False
 
 
@@ -121,25 +156,36 @@ def _prepare_payload(
     """Prepare OpenAI-compatible chat completion payload."""
     return {
         "model": model_name,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encode_image(image)}"}},
-            ],
-        }],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{encode_image(image)}"
+                        },
+                    },
+                ],
+            }
+        ],
         "max_tokens": max_tokens,
         "temperature": temperature,
         "extra_body": {
             "skip_special_tokens": False,
-            "vllm_xargs": {"ngram_size": 30, "window_size": 90, "whitelist_token_ids": "[128821,128822]"},
+            "vllm_xargs": {
+                "ngram_size": 30,
+                "window_size": 90,
+                "whitelist_token_ids": "[128821,128822]",
+            },
         },
     }
 
 
 class DeepSeekClient:
     """Async batch inference client for DeepSeek OCR via vLLM."""
-    
+
     def __init__(
         self,
         base_url: str,
@@ -182,27 +228,42 @@ class DeepSeekClient:
         return getattr(response.choices[0].message, "content", "") or ""
 
     def infer(self, requests_data: Sequence[Dict[str, Any]]) -> List[str]:
-        """Run batch inference synchronously."""
+        """Run batch inference synchronously.
+
+        Args:
+            requests_data: List of dicts with keys: image (PIL.Image), prompt (str),
+                           optional: max_tokens, temperature, request_timeout
+
+        Returns:
+            List of response strings, one per request
+        """
         if not requests_data:
             return []
 
         payloads = []
         timeouts = []
         for req in requests_data:
-            payloads.append(_prepare_payload(
-                image=req["image"],
-                model_name=self.model_name,
-                prompt=req.get("prompt", ""),
-                max_tokens=req.get("max_tokens", self.default_max_tokens),
-                temperature=req.get("temperature", self.default_temperature),
-            ))
+            payloads.append(
+                _prepare_payload(
+                    image=req["image"],
+                    model_name=self.model_name,
+                    prompt=req.get("prompt", ""),
+                    max_tokens=req.get("max_tokens", self.default_max_tokens),
+                    temperature=req.get("temperature", self.default_temperature),
+                )
+            )
             timeouts.append(req.get("request_timeout") or self.default_request_timeout)
 
         return self._run_async(self._async_infer_batch(payloads, timeouts))
 
-    async def _async_infer_batch(self, payloads: Sequence[Dict[str, Any]], timeouts: Sequence[int]) -> List[str]:
+    async def _async_infer_batch(
+        self, payloads: Sequence[Dict[str, Any]], timeouts: Sequence[int]
+    ) -> List[str]:
         """Run batch of async completions concurrently."""
-        tasks = [asyncio.create_task(self._async_completion(p, t)) for p, t in zip(payloads, timeouts)]
+        tasks = [
+            asyncio.create_task(self._async_completion(p, t))
+            for p, t in zip(payloads, timeouts)
+        ]
         return await asyncio.gather(*tasks)
 
     @staticmethod
@@ -217,13 +278,3 @@ class DeepSeekClient:
         finally:
             asyncio.set_event_loop(None)
             loop.close()
-
-
-__all__ = [
-    "launch_vllm",
-    "shutdown_server", 
-    "wait_for_server",
-    "should_launch_server",
-    "base_url_from_env",
-    "DeepSeekClient",
-]

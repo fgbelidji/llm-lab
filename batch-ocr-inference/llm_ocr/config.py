@@ -1,4 +1,5 @@
 """Configuration dataclasses for pipeline stages."""
+
 from __future__ import annotations
 
 import logging
@@ -27,6 +28,7 @@ def env(key: str, default: T = None, cast: Type[T] = str) -> T:
 @dataclass
 class FigureMetadata:
     """Metadata for an extracted figure (image stored in dataset, not as file)."""
+
     figure_id: str
     label: str
     bounding_box_pixels: Dict[str, int]
@@ -36,6 +38,7 @@ class FigureMetadata:
 @dataclass
 class InferenceSettings:
     """Settings for batch inference."""
+
     batch_size: int = 4
     max_concurrency: int = 4
     request_timeout: int = 120
@@ -58,6 +61,7 @@ class InferenceSettings:
 @dataclass
 class HubSettings:
     """Settings for HuggingFace Hub upload."""
+
     repo_id: Optional[str] = None
     path_in_repo: str = ""
     branch: Optional[str] = None
@@ -78,6 +82,7 @@ class HubSettings:
 @dataclass
 class ExtractSettings:
     """Settings for the extract stage."""
+
     dataset_name: str
     dataset_config: str
     dataset_split: str
@@ -100,7 +105,9 @@ class ExtractSettings:
             dataset_split=env("DATASET_SPLIT", "train"),
             output_dir=Path(env("OUTPUT_DIR", "./outputs/extract")),
             client=client,
-            prompt=env("DOC_PROMPT", "<image>\n<|grounding|>Convert this document to Markdown."),
+            prompt=env(
+                "DOC_PROMPT", "<image>\n<|grounding|>Convert this document to Markdown."
+            ),
             max_tokens=env("DOC_MAX_TOKENS", 2048, int),
             temperature=env("DOC_TEMPERATURE", 0.0, float),
             max_samples=env("MAX_SAMPLES", None, int),
@@ -113,6 +120,7 @@ class ExtractSettings:
 @dataclass
 class DescribeSettings:
     """Settings for the describe stage."""
+
     output_dir: Path
     client: Any  # DeepSeekClient
     source_repo_id: Optional[str] = None
@@ -140,6 +148,7 @@ class DescribeSettings:
 @dataclass
 class AssembleSettings:
     """Settings for the assemble stage."""
+
     source_repo_id: Optional[str] = None
     hub: HubSettings = field(default_factory=HubSettings)
 
@@ -150,14 +159,3 @@ class AssembleSettings:
             source_repo_id=env("SOURCE_REPO_ID") or env("HF_REPO_ID"),
             hub=HubSettings.from_env("HF"),
         )
-
-
-__all__ = [
-    "env",
-    "FigureMetadata",
-    "InferenceSettings",
-    "HubSettings",
-    "ExtractSettings",
-    "DescribeSettings",
-    "AssembleSettings",
-]
