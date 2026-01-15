@@ -1,0 +1,30 @@
+# Lightweight image for CPU-only assemble stage
+# Only needs datasets library and GCS access - no ML frameworks (~500MB vs ~15GB)
+FROM python:3.12-slim
+
+# Install uv for fast dependency management
+RUN pip install uv
+
+# Copy pipeline code
+WORKDIR /app
+COPY llm_ocr/ /app/llm_ocr/
+COPY google-cloud-run/cloudrun_job_runner.py /app/
+
+# Install minimal dependencies (no PyTorch, no vLLM)
+RUN uv pip install --system \
+    datasets \
+    pillow \
+    google-cloud-storage \
+    huggingface_hub \
+    hf_transfer \
+    rich \
+    gcsfs \
+    openai
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV PYTHONPATH=/app:$PYTHONPATH
+
+# Entry point
+ENTRYPOINT ["python", "/app/cloudrun_job_runner.py"]
